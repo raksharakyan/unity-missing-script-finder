@@ -7,7 +7,10 @@
 //   - Scans ALL scenes in the project (without opening them)
 //   - Scans all Prefabs in the project
 //   - Click any result to ping the GameObject in the Hierarchy
-//   - One-click remove all missing scripts
+//   - Checkbox per result — remove selected items only
+//   - Remove selected OR remove all — works on both scenes AND prefabs
+//   - Prefab changes saved back to disk automatically via PrefabUtility
+//   - Select All / None shortcuts
 //   - Export results to a .txt log file
 
 using System;
@@ -29,19 +32,21 @@ namespace MissingScriptTools.Editor
 
         private class Result
         {
-            public string SceneOrAsset;   // scene name or prefab path
-            public string GameObjectPath; // full hierarchy path
-            public int    ComponentIndex; // index of the missing component
-            public GameObject Go;         // null for cross-scene results
+            public string     SceneOrAsset;    // scene name or prefab path
+            public string     GameObjectPath;  // full hierarchy path
+            public int        ComponentIndex;  // index of the missing component
+            public GameObject Go;              // live ref (scene) or prefab root
+            public string     PrefabAssetPath; // set only for prefab results
+            public bool       Selected = true;
         }
 
-        private ScanMode          _mode       = ScanMode.CurrentScene;
-        private List<Result>      _results    = new List<Result>();
-        private Vector2           _scroll;
-        private bool              _scanning   = false;
-        private string            _statusMsg  = "";
-        private bool              _statusErr  = false;
-        private string            _searchFilter = "";
+        private ScanMode     _mode         = ScanMode.CurrentScene;
+        private List<Result> _results      = new List<Result>();
+        private Vector2      _scroll;
+        private bool         _scanning     = false;
+        private string       _statusMsg    = "";
+        private bool         _statusErr    = false;
+        private string       _searchFilter = "";
 
         // ── Menu ──────────────────────────────────────────────────────────────
 
@@ -117,14 +122,27 @@ namespace MissingScriptTools.Editor
             EditorGUILayout.BeginHorizontal();
 
             GUI.enabled = !_scanning;
-            if (GUILayout.Button("🔍  Scan", GUILayout.Height(32), GUILayout.Width(100)))
+            if (GUILayout.Button("🔍  Scan", GUILayout.Height(32), GUILayout.Width(90)))
                 RunScan();
 
             GUI.enabled = _results.Count > 0;
-            if (GUILayout.Button("🗑  Remove all missing", GUILayout.Height(32)))
+
+            // Select all / none
+            if (GUILayout.Button("All", GUILayout.Height(32), GUILayout.Width(38)))
+                _results.ForEach(r => r.Selected = true);
+            if (GUILayout.Button("None", GUILayout.Height(32), GUILayout.Width(44)))
+                _results.ForEach(r => r.Selected = false);
+
+            int selectedCount = _results.FindAll(r => r.Selected).Count;
+            GUI.enabled = selectedCount > 0;
+            if (GUILayout.Button($"🗑  Remove selected ({selectedCount})", GUILayout.Height(32)))
+                RemoveSelected();
+
+            GUI.enabled = _results.Count > 0;
+            if (GUILayout.Button("🗑  Remove all", GUILayout.Height(32)))
                 RemoveAllMissing();
 
-            if (GUILayout.Button("💾  Export log", GUILayout.Height(32), GUILayout.Width(110)))
+            if (GUILayout.Button("💾  Export", GUILayout.Height(32), GUILayout.Width(72)))
                 ExportLog();
 
             GUI.enabled = true;
@@ -190,6 +208,9 @@ namespace MissingScriptTools.Editor
                 }
 
                 EditorGUILayout.BeginHorizontal(EditorStyles.helpBox);
+
+                // Checkbox for selective removal
+                r.Selected = EditorGUILayout.Toggle(r.Selected, GUILayout.Width(18));
 
                 // Warning icon
                 EditorGUILayout.LabelField(
@@ -323,7 +344,9 @@ namespace MissingScriptTools.Editor
                 var prefab = AssetDatabase.LoadAssetAtPath<GameObject>(path);
                 if (prefab == null) continue;
 
-                ScanGameObject(prefab, path, keepRef: false);
+                // keepRef: true so we hold the prefab root for editing later
+                // PrefabAssetPath is passed so RemoveSelected/All can save it
+                ScanGameObject(prefab, path, keepRef: true, prefabAssetPath: path);
             }
 
             EditorUtility.ClearProgressBar();
@@ -331,60 +354,132 @@ namespace MissingScriptTools.Editor
 
         // ── Shared scan ───────────────────────────────────────────────────────
 
-        void ScanGameObject(GameObject go, string sceneOrAsset, bool keepRef, string parentPath = "")
+        void ScanGameObject(GameObject go, string sceneOrAsset, bool keepRef,
+                            string parentPath = "", string prefabAssetPath = null)
         {
             string path = string.IsNullOrEmpty(parentPath) ? go.name : $"{parentPath}/{go.name}";
 
             var components = go.GetComponents<Component>();
             for (int i = 0; i < components.Length; i++)
             {
-                if (components[i] == null) // null component = missing script
+                if (components[i] == null)
                 {
                     _results.Add(new Result
                     {
-                        SceneOrAsset   = sceneOrAsset,
-                        GameObjectPath = path,
-                        ComponentIndex = i,
-                        Go             = keepRef ? go : null
+                        SceneOrAsset    = sceneOrAsset,
+                        GameObjectPath  = path,
+                        ComponentIndex  = i,
+                        Go              = keepRef ? go : null,
+                        PrefabAssetPath = prefabAssetPath
                     });
                 }
             }
 
-            // Recurse into children
             foreach (Transform child in go.transform)
-                ScanGameObject(child.gameObject, sceneOrAsset, keepRef, path);
+                ScanGameObject(child.gameObject, sceneOrAsset, keepRef, path, prefabAssetPath);
         }
 
         // ── Remove all missing ────────────────────────────────────────────────
 
-        void RemoveAllMissing()
+        void RemoveSelected()
         {
-            if (_mode != ScanMode.CurrentScene)
+            var toRemove = _results.FindAll(r => r.Selected && r.Go != null);
+            if (toRemove.Count == 0)
             {
-                SetStatus("Remove only works on the current scene. " +
-                          "Switch to Current Scene mode and scan first.", error: true);
+                SetStatus("No items selected — tick the checkboxes next to the ones you want to remove.", error: true);
                 return;
             }
 
             bool confirm = EditorUtility.DisplayDialog(
-                "Remove missing scripts",
-                $"This will remove {_results.Count} missing script reference(s) from the current scene.\n\nThis cannot be undone. Continue?",
+                "Remove selected missing scripts",
+                $"Remove {toRemove.Count} selected missing script reference(s)?\n\nThis cannot be undone.",
+                "Remove", "Cancel");
+
+            if (!confirm) return;
+
+            DoRemove(toRemove);
+            _results.RemoveAll(r => r.Selected && r.Go != null);
+            SetStatus($"✓ Done. {_results.Count} item(s) remaining.", error: false);
+            Repaint();
+        }
+
+        void RemoveAllMissing()
+        {
+            var removable = _results.FindAll(r => r.Go != null);
+            if (removable.Count == 0)
+            {
+                SetStatus("Nothing to remove — run a Current Scene or Prefabs scan first.", error: true);
+                return;
+            }
+
+            bool confirm = EditorUtility.DisplayDialog(
+                "Remove ALL missing scripts",
+                $"Remove ALL {removable.Count} missing script reference(s)?\n\nThis cannot be undone.",
                 "Remove all", "Cancel");
 
             if (!confirm) return;
 
-            int removed = 0;
-            foreach (var r in _results)
+            DoRemove(removable);
+            _results.Clear();
+            SetStatus("✓ All missing scripts removed. Save your scene/prefabs to keep changes.", error: false);
+            Repaint();
+        }
+
+        /// Shared removal logic — handles both scene GameObjects and prefab assets.
+        void DoRemove(List<Result> items)
+        {
+            // Group by prefab asset path (null = scene object)
+            var sceneObjects  = new HashSet<GameObject>();
+            var prefabAssets  = new Dictionary<string, GameObject>(); // path → prefab root
+
+            foreach (var r in items)
             {
                 if (r.Go == null) continue;
-                GameObjectUtility.RemoveMonoBehavioursWithMissingScript(r.Go);
-                removed++;
+
+                if (string.IsNullOrEmpty(r.PrefabAssetPath))
+                {
+                    // Scene GameObject
+                    if (!sceneObjects.Contains(r.Go))
+                    {
+                        GameObjectUtility.RemoveMonoBehavioursWithMissingScript(r.Go);
+                        sceneObjects.Add(r.Go);
+                    }
+                }
+                else
+                {
+                    // Prefab asset — collect roots, process once per prefab
+                    if (!prefabAssets.ContainsKey(r.PrefabAssetPath))
+                        prefabAssets[r.PrefabAssetPath] = r.Go;
+                }
             }
 
-            EditorSceneManager.MarkSceneDirty(SceneManager.GetActiveScene());
-            _results.Clear();
-            SetStatus($"✓ Removed missing scripts from {removed} GameObject(s). Save the scene to keep changes.", error: false);
-            Repaint();
+            // Remove from prefabs and save back to disk
+            foreach (var kvp in prefabAssets)
+            {
+                // We need to traverse the whole prefab root, not just one GO
+                RemoveMissingFromHierarchy(kvp.Value);
+                PrefabUtility.SavePrefabAsset(GetPrefabRoot(kvp.Value));
+            }
+
+            // Mark scene dirty if we touched scene objects
+            if (sceneObjects.Count > 0)
+                EditorSceneManager.MarkSceneDirty(SceneManager.GetActiveScene());
+
+            AssetDatabase.SaveAssets();
+        }
+
+        void RemoveMissingFromHierarchy(GameObject go)
+        {
+            GameObjectUtility.RemoveMonoBehavioursWithMissingScript(go);
+            foreach (Transform child in go.transform)
+                RemoveMissingFromHierarchy(child.gameObject);
+        }
+
+        GameObject GetPrefabRoot(GameObject go)
+        {
+            // Walk up to find the actual prefab root asset
+            var root = PrefabUtility.GetOutermostPrefabInstanceRoot(go);
+            return root != null ? root : go;
         }
 
         // ── Export log ────────────────────────────────────────────────────────
