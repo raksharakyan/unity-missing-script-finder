@@ -1,7 +1,6 @@
 # Unity Missing Script Finder
 
 > Find and remove missing script components across your entire Unity project — scenes, prefabs, everything.
-> Full Demo : https://youtu.be/PVFgiFCIs-0
 
 ![Unity](https://img.shields.io/badge/Unity-2021.3%2B-black?logo=unity)
 <img width="950" height="1202" alt="image" src="https://github.com/user-attachments/assets/09f860d8-93ef-485c-897b-8452feda1dd7" />
@@ -93,6 +92,12 @@ No manual save needed — prefab files are updated on disk immediately.
 
 - Unity 2021.3 or newer
 - No external dependencies
+
+---
+
+## Full Demo
+
+- https://youtu.be/PVFgiFCIs-0
 
 ---
 
